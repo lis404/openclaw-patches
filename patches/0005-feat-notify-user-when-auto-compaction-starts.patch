@@ -1,0 +1,75 @@
+From 1cd65248ce3cdc640c6ba8c801c8d8bee7f0b6f8 Mon Sep 17 00:00:00 2001
+From: Lis <lis@hanake0.dev>
+Date: Fri, 27 Feb 2026 21:51:27 +0000
+Subject: [PATCH] feat: notify user when auto-compaction starts
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Send a WhatsApp message when auto-compaction begins so the user knows
+why the agent is silent. Adds onCompactionStart callback to GetReplyOptions,
+wired through agent-runner-execution.ts → process-message.ts.
+
+Co-authored-by: Hanake0 <bghaesee@outlook.com>
+---
+ src/auto-reply/reply/agent-runner-execution.ts |  4 +++-
+ src/auto-reply/types.ts                        |  2 ++
+ src/web/auto-reply/monitor/process-message.ts  | 14 ++++++++++++++
+ 3 files changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/src/auto-reply/reply/agent-runner-execution.ts b/src/auto-reply/reply/agent-runner-execution.ts
+index a9bd537..eba114c 100644
+--- a/src/auto-reply/reply/agent-runner-execution.ts
++++ b/src/auto-reply/reply/agent-runner-execution.ts
+@@ -363,7 +363,9 @@ export async function runAgentTurnWithFallback(params: {
+               // Track auto-compaction completion
+               if (evt.stream === "compaction") {
+                 const phase = typeof evt.data.phase === "string" ? evt.data.phase : "";
+-                if (phase === "end") {
++                if (phase === "start") {
++                  await params.opts?.onCompactionStart?.();
++                } else if (phase === "end") {
+                   autoCompactionCompleted = true;
+                 }
+               }
+diff --git a/src/auto-reply/types.ts b/src/auto-reply/types.ts
+index 69ccead..ca00fa9 100644
+--- a/src/auto-reply/types.ts
++++ b/src/auto-reply/types.ts
+@@ -52,6 +52,8 @@ export type GetReplyOptions = {
+   onToolResult?: (payload: ReplyPayload) => Promise<void> | void;
+   /** Called when a tool phase starts/updates, before summary payloads are emitted. */
+   onToolStart?: (payload: { name?: string; phase?: string }) => Promise<void> | void;
++  /** Called when auto-compaction starts (useful to notify users of the pause). */
++  onCompactionStart?: () => Promise<void> | void;
+   /** Called when the actual model is selected (including after fallback).
+    * Use this to get model/provider/thinkLevel for responsePrefix template interpolation. */
+   onModelSelected?: (ctx: ModelSelectedContext) => void;
+diff --git a/src/web/auto-reply/monitor/process-message.ts b/src/web/auto-reply/monitor/process-message.ts
+index 9e5f82b..44aa6f3 100644
+--- a/src/web/auto-reply/monitor/process-message.ts
++++ b/src/web/auto-reply/monitor/process-message.ts
+@@ -429,6 +429,20 @@ export async function processMessage(params: {
+       // Respect channel config for block streaming (default: disabled for WhatsApp)
+       disableBlockStreaming: !params.cfg.channels?.whatsapp?.blockStreaming,
+       onModelSelected,
++      onCompactionStart: async () => {
++        await deliverWebReply({
++          replyResult: { text: "⏳ Compactando contexto, um momento..." },
++          msg: params.msg,
++          mediaLocalRoots,
++          maxMediaBytes: params.maxMediaBytes,
++          textLimit,
++          chunkMode,
++          replyLogger: params.replyLogger,
++          connectionId: params.connectionId,
++          skipLog: true,
++          tableMode,
++        });
++      },
+     },
+   });
+ 
+-- 
+2.47.3
+
