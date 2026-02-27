@@ -1,0 +1,78 @@
+From c61a57daa400b3387f0f339a2e2c8d327aacb8b1 Mon Sep 17 00:00:00 2001
+From: Breno <bghaesee@outlook.com>
+Date: Fri, 27 Feb 2026 16:14:54 +0000
+Subject: [PATCH 3/3] feat: enable block streaming and tool summaries for
+ WhatsApp
+
+The deliver callback was dropping all non-final messages, preventing
+block streaming and verbose tool summaries from reaching WhatsApp.
+
+Changes:
+- Allow block and tool kinds through deliver callback
+- Filter message tool summaries (react/send) to avoid spam
+- Only run rememberSentText for final replies (echo tracker)
+- Respect channel blockStreaming config instead of hardcoded disable
+
+Co-authored-by: Lis <lis@hanake0.dev>
+---
+ src/web/auto-reply/monitor/process-message.ts | 30 +++++++++++--------
+ 1 file changed, 17 insertions(+), 13 deletions(-)
+
+diff --git a/src/web/auto-reply/monitor/process-message.ts b/src/web/auto-reply/monitor/process-message.ts
+index 2e49e9c..9e5f82b 100644
+--- a/src/web/auto-reply/monitor/process-message.ts
++++ b/src/web/auto-reply/monitor/process-message.ts
+@@ -373,10 +373,13 @@ export async function processMessage(params: {
+         }
+       },
+       deliver: async (payload: ReplyPayload, info) => {
+-        if (info.kind !== "final") {
+-          // Only deliver final replies to external messaging channels (WhatsApp).
+-          // Block (reasoning/thinking) and tool updates are meant for the internal
+-          // web UI only; sending them here leaks chain-of-thought to end users.
++        if (info.kind !== "final" && info.kind !== "block" && info.kind !== "tool") {
++          // Only deliver final, block, and tool replies to WhatsApp.
++          // Reasoning/thinking updates are kept internal.
++          return;
++        }
++        // Filter out tool summaries from message actions (react/send) to avoid spam
++        if (info.kind === "tool" && payload.text && /Message:/i.test(payload.text)) {
+           return;
+         }
+         await deliverWebReply({
+@@ -392,12 +395,14 @@ export async function processMessage(params: {
+           tableMode,
+         });
+         didSendReply = true;
+-        const shouldLog = payload.text ? true : undefined;
+-        params.rememberSentText(payload.text, {
+-          combinedBody,
+-          combinedBodySessionKey: params.route.sessionKey,
+-          logVerboseMessage: shouldLog,
+-        });
++        if (info.kind === "final") {
++          const shouldLog = payload.text ? true : undefined;
++          params.rememberSentText(payload.text, {
++            combinedBody,
++            combinedBodySessionKey: params.route.sessionKey,
++            logVerboseMessage: shouldLog,
++          });
++        }
+         const fromDisplay =
+           params.msg.chatType === "group" ? conversationId : (params.msg.from ?? "unknown");
+         const hasMedia = Boolean(payload.mediaUrl || payload.mediaUrls?.length);
+@@ -421,9 +426,8 @@ export async function processMessage(params: {
+       onReplyStart: params.msg.sendComposing,
+     },
+     replyOptions: {
+-      // WhatsApp delivery intentionally suppresses non-final payloads.
+-      // Keep block streaming disabled so final replies are still produced.
+-      disableBlockStreaming: true,
++      // Respect channel config for block streaming (default: disabled for WhatsApp)
++      disableBlockStreaming: !params.cfg.channels?.whatsapp?.blockStreaming,
+       onModelSelected,
+     },
+   });
+-- 
+2.39.5
+
