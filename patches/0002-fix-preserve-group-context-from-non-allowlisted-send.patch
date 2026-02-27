@@ -1,0 +1,85 @@
+From 540509218244db663f1291213bea9607545ca733 Mon Sep 17 00:00:00 2001
+From: Breno <bghaesee@outlook.com>
+Date: Fri, 27 Feb 2026 16:14:39 +0000
+Subject: [PATCH 2/3] fix: preserve group context from non-allowlisted senders
+
+Messages from senders not in groupAllowFrom were silently dropped,
+losing conversation context. Now records them in group history via
+onRejectedGroupMessage callback so the bot has context when mentioned.
+
+Co-authored-by: Lis <lis@hanake0.dev>
+---
+ src/web/auto-reply/monitor.ts | 17 ++++++++++++++++-
+ src/web/inbound/monitor.ts    | 14 ++++++++++++++
+ 2 files changed, 30 insertions(+), 1 deletion(-)
+
+diff --git a/src/web/auto-reply/monitor.ts b/src/web/auto-reply/monitor.ts
+index b7e2bb2..bf57f31 100644
+--- a/src/web/auto-reply/monitor.ts
++++ b/src/web/auto-reply/monitor.ts
+@@ -1,7 +1,8 @@
+ import { hasControlCommand } from "../../auto-reply/command-detection.js";
+ import { resolveInboundDebounceMs } from "../../auto-reply/inbound-debounce.js";
+ import { getReplyFromConfig } from "../../auto-reply/reply.js";
+-import { DEFAULT_GROUP_HISTORY_LIMIT } from "../../auto-reply/reply/history.js";
++import { DEFAULT_GROUP_HISTORY_LIMIT, recordPendingHistoryEntryIfEnabled } from "../../auto-reply/reply/history.js";
++import { buildGroupHistoryKey } from "../../routing/session-key.js";
+ import { formatCliCommand } from "../../cli/command-format.js";
+ import { waitForever } from "../../cli/wait.js";
+ import { loadConfig } from "../../config/config.js";
+@@ -204,6 +205,20 @@ export async function monitorWebChannel(
+       sendReadReceipts: account.sendReadReceipts,
+       debounceMs: inboundDebounceMs,
+       shouldDebounce,
++      onRejectedGroupMessage: ({ remoteJid, senderName, body, timestampMs }) => {
++        const key = buildGroupHistoryKey({
++          channel: "whatsapp",
++          accountId: account.accountId,
++          peerKind: "group",
++          peerId: remoteJid,
++        });
++        recordPendingHistoryEntryIfEnabled({
++          historyMap: groupHistories,
++          historyKey: key,
++          limit: groupHistoryLimit,
++          entry: { sender: senderName, body, timestamp: timestampMs },
++        });
++      },
+       onMessage: async (msg: WebInboundMsg) => {
+         handledMessages += 1;
+         lastMessageAt = Date.now();
+diff --git a/src/web/inbound/monitor.ts b/src/web/inbound/monitor.ts
+index 3078112..f6aa5a0 100644
+--- a/src/web/inbound/monitor.ts
++++ b/src/web/inbound/monitor.ts
+@@ -27,6 +27,8 @@ export async function monitorWebInbox(options: {
+   accountId: string;
+   authDir: string;
+   onMessage: (msg: WebInboundMessage) => Promise<void>;
++  /** Called for group messages from senders rejected by access control, to preserve context. */
++  onRejectedGroupMessage?: (info: { remoteJid: string; senderName: string; body: string; timestampMs: number }) => void;
+   mediaMaxMb?: number;
+   /** Send read receipts for incoming messages (default true). */
+   sendReadReceipts?: boolean;
+@@ -213,6 +215,18 @@ export async function monitorWebInbox(options: {
+         remoteJid,
+       });
+       if (!access.allowed) {
++        // Record rejected group messages for context preservation
++        if (group && options.onRejectedGroupMessage) {
++          const body = extractText(msg.message ?? undefined) || extractMediaPlaceholder(msg.message ?? undefined);
++          if (body) {
++            options.onRejectedGroupMessage({
++              remoteJid,
++              senderName: msg.pushName ?? msg.key?.participant ?? "Unknown",
++              body,
++              timestampMs: typeof msg.messageTimestamp === "number" ? Number(msg.messageTimestamp) * 1000 : Date.now(),
++            });
++          }
++        }
+         continue;
+       }
+ 
+-- 
+2.39.5
+
