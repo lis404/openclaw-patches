@@ -1,0 +1,103 @@
+From f5fc61a4d9587722467394e274246c66efc895e6 Mon Sep 17 00:00:00 2001
+From: Lis <lis@hanake0.dev>
+Date: Fri, 27 Feb 2026 21:25:10 +0000
+Subject: [PATCH] feat: configurable compaction model override
+
+Add compaction.model field to AgentCompactionConfig allowing a cheaper
+model (e.g. claude-sonnet-4-6) for context compaction instead of the
+session model (opus). Falls back to session model when not set or not found.
+
+Co-authored-by: Hanake0 <bghaesee@outlook.com>
+---
+ src/agents/pi-embedded-runner/extensions.ts | 25 ++++++++++++++++++++-
+ src/config/types.agent-defaults.ts          |  3 ++-
+ src/config/zod-schema.agent-defaults.ts     |  1 +
+ 3 files changed, 27 insertions(+), 2 deletions(-)
+
+diff --git a/src/agents/pi-embedded-runner/extensions.ts b/src/agents/pi-embedded-runner/extensions.ts
+index 5ecf2c9..d36475a 100644
+--- a/src/agents/pi-embedded-runner/extensions.ts
++++ b/src/agents/pi-embedded-runner/extensions.ts
+@@ -1,6 +1,7 @@
+ import type { Api, Model } from "@mariozechner/pi-ai";
+ import type { ExtensionFactory, SessionManager } from "@mariozechner/pi-coding-agent";
+ import type { OpenClawConfig } from "../../config/config.js";
++import { createSubsystemLogger } from "../../logging/subsystem.js";
+ import { resolveContextWindowInfo } from "../context-window-guard.js";
+ import { DEFAULT_CONTEXT_TOKENS } from "../defaults.js";
+ import { setCompactionSafeguardRuntime } from "../pi-extensions/compaction-safeguard-runtime.js";
+@@ -11,6 +12,9 @@ import { computeEffectiveSettings } from "../pi-extensions/context-pruning/setti
+ import { makeToolPrunablePredicate } from "../pi-extensions/context-pruning/tools.js";
+ import { ensurePiCompactionReserveTokens } from "../pi-settings.js";
+ import { isCacheTtlEligibleProvider, readLastCacheTtlTimestamp } from "./cache-ttl.js";
++import { resolveModel } from "./model.js";
++
++const log = createSubsystemLogger("compaction-model");
+ 
+ function resolveContextWindowTokens(params: {
+   cfg: OpenClawConfig | undefined;
+@@ -61,6 +65,25 @@ function resolveCompactionMode(cfg?: OpenClawConfig): "default" | "safeguard" {
+   return cfg?.agents?.defaults?.compaction?.mode === "safeguard" ? "safeguard" : "default";
+ }
+ 
++function resolveCompactionModel(
++  modelRef: string | undefined,
++  params: { cfg: OpenClawConfig | undefined; provider: string; modelId: string },
++): Model<Api> | undefined {
++  if (!modelRef?.trim()) {
++    return undefined;
++  }
++  const parts = modelRef.trim().split("/");
++  const provider = parts.length > 1 ? parts[0] : params.provider;
++  const modelId = parts.length > 1 ? parts.slice(1).join("/") : parts[0];
++  const { model } = resolveModel(provider, modelId, undefined, params.cfg ?? undefined);
++  if (model) {
++    log.info(`Using compaction model override: ${provider}/${modelId}`);
++  } else {
++    log.warn(`Compaction model override "${modelRef}" not found; falling back to session model`);
++  }
++  return model ?? undefined;
++}
++
+ export function buildEmbeddedExtensionFactories(params: {
+   cfg: OpenClawConfig | undefined;
+   sessionManager: SessionManager;
+@@ -83,7 +106,7 @@ export function buildEmbeddedExtensionFactories(params: {
+       contextWindowTokens: contextWindowInfo.tokens,
+       identifierPolicy: compactionCfg?.identifierPolicy,
+       identifierInstructions: compactionCfg?.identifierInstructions,
+-      model: params.model,
++      model: resolveCompactionModel(compactionCfg?.model, params) ?? params.model,
+     });
+     factories.push(compactionSafeguardExtension);
+   }
+diff --git a/src/config/types.agent-defaults.ts b/src/config/types.agent-defaults.ts
+index 303d3b9..d95cce6 100644
+--- a/src/config/types.agent-defaults.ts
++++ b/src/config/types.agent-defaults.ts
+@@ -272,8 +272,9 @@ export type AgentCompactionMode = "default" | "safeguard";
+ export type AgentCompactionIdentifierPolicy = "strict" | "off" | "custom";
+ 
+ export type AgentCompactionConfig = {
+-  /** Compaction summarization mode. */
+   mode?: AgentCompactionMode;
++  /** Override the model used for compaction summarization (e.g. "anthropic/claude-sonnet-4-6"). Defaults to session model. */
++  model?: string;
+   /** Pi reserve tokens target before floor enforcement. */
+   reserveTokens?: number;
+   /** Pi keepRecentTokens budget used for cut-point selection. */
+diff --git a/src/config/zod-schema.agent-defaults.ts b/src/config/zod-schema.agent-defaults.ts
+index afbe226..bec88cb 100644
+--- a/src/config/zod-schema.agent-defaults.ts
++++ b/src/config/zod-schema.agent-defaults.ts
+@@ -80,6 +80,7 @@ export const AgentDefaultsSchema = z
+     compaction: z
+       .object({
+         mode: z.union([z.literal("default"), z.literal("safeguard")]).optional(),
++        model: z.string().optional(),
+         reserveTokens: z.number().int().nonnegative().optional(),
+         keepRecentTokens: z.number().int().positive().optional(),
+         reserveTokensFloor: z.number().int().nonnegative().optional(),
+-- 
+2.47.3
+
